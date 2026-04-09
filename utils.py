@@ -25,6 +25,19 @@ def make_output_path(filename: str) -> str:
     ensure_upload_dir()
     return os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{filename}")
 
+# 🛡️ 資安防護：過濾檔名，防止路徑穿越攻擊 (Path Traversal)
+def secure_filename(filename: str) -> str:
+    """
+    只保留英數字、中文字、點(.)、底線(_)和橫線(-)，
+    過濾掉如 ../ 等可能導致目錄穿越的危險符號。
+    """
+    if not filename:
+        return "unnamed_file"
+    # 將不符合規則的字元替換為底線
+    safe_name = re.sub(r'[^\w\u4e00-\u9fa5\.\-]', '_', filename)
+    # 避免檔名以點開頭（隱藏檔）
+    return safe_name.lstrip('.')
+
 def save_upload_file(up_file) -> Dict[str, Any]:
     ensure_upload_dir()
     data = up_file.getvalue()
@@ -33,14 +46,17 @@ def save_upload_file(up_file) -> Dict[str, Any]:
 
     ext = os.path.splitext(up_file.name)[-1].lower().lstrip(".")
     file_id = str(uuid.uuid4())
-    storage_path = os.path.join(UPLOAD_DIR, f"{file_id}_{up_file.name}")
+    
+    # 🛡️ 使用安全的檔名進行儲存
+    safe_name = secure_filename(up_file.name)
+    storage_path = os.path.join(UPLOAD_DIR, f"{file_id}_{safe_name}")
 
     with open(storage_path, "wb") as f:
         f.write(data)
 
     return {
         "doc_id": file_id,
-        "file_name": up_file.name,
+        "file_name": safe_name,  # 記錄安全的檔名
         "file_type": ext,
         "storage_path": storage_path,
         "sha256": sha256_bytes(data),
