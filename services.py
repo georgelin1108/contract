@@ -268,7 +268,7 @@ def llm_review_single_article(article: Dict[str, Any], article_key: str, candida
 1. 只能輸出 JSON，不可輸出多餘的文字。
 2. 判斷標準【必須完全依據模板片段】。絕不可憑空捏造、猜測或引用「行業慣例」。若模板片段中沒有相關規定，請直接略過不要將其列為問題。
 3. issue_topic 必須嚴格且完全照抄下列清單之一，絕對不可自行合併或創造新詞（例如：只能寫「維護時間」，不可寫「維護時間與人力」）：{prompt_topics}
-4. 若單一草稿條款包含多個風險主題（如同時涉及時間與違約金），請務必拆分成多筆獨立的 JSON 物件。
+4. 若單一草稿條款包含多個不同層面的風險（例如同時涉及「維護時間」與「維護人力」），請務必窮盡列出，並拆分成多筆獨立的 JSON 物件，絕不可遺漏任何一個風險點。
 5. analysis (風險分析)：具體說明草稿與模板的差異，以及對甲方的潛在風險。
 6. suggestion (建議修正)：直接依據模板的具體數字或標準給出具體修改方向。不可自行發明模板沒有的新制度或新期限。
 7. template_snippet (模板原文)：請從【模板依據片段】中，精準擷取與此風險最相關的「原文字句」（請挑選最關鍵的1~2句即可，切勿整段照抄）。
@@ -300,33 +300,75 @@ def llm_review_single_article(article: Dict[str, Any], article_key: str, candida
 """
     return ollama_json(prompt)
 
-def infer_missing_topics_from_templates(selected_templates: List[Dict[str, Any]], articles: List[Dict[str, Any]], draft_text: str) -> List[str]:
+def infer_missing_topics_from_templates(selected_templates: List[Dict[str, Any]], articles: List[Dict[str, Any]], found_topics_by_llm: set) -> List[str]:
     template_topics = set()
     for t in selected_templates:
         template_topics.update(t.get("core_topics", []))
+    
     draft_topics = set()
     for a in articles:
         draft_topics.update(a.get("topics", []))
         
+    all_found_topics = draft_topics.union(found_topics_by_llm)
+        
     missing = set()
     for topic in template_topics:
-        if topic not in draft_topics:
+        if topic not in all_found_topics:
             missing.add(topic)
     return sorted(missing)
 
+# 💡 新增防禦 AI 提示詞注入的資安函式
+def check_prompt_injection(text: str) -> bool:
+    """
+    🛡️ 資安防護：檢查草稿中是否包含企圖覆寫 AI 指令的惡意關鍵字
+    """
+    suspicious_patterns = [
+        r"忽略.*指示", r"ignore.*instructions", r"system prompt", 
+        r"忘記.*規則", r"覆寫", r"override", r"你是.*不要扮演",
+        r"直接輸出.*風險", r"無風險"
+    ]
+    
+    text_lower = text.lower()
+    for pattern in suspicious_patterns:
+        if re.search(pattern, text_lower):
+            logging.warning(f"🚨 偵測到潛在的 Prompt Injection 攻擊！觸發規則：{pattern}")
+            return True
+    return False
+
 def review_articles_individually(draft_text: str, selected_templates: List[Dict[str, Any]], articles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # 🛡️ 啟動 Prompt Injection 攔截網
+    if check_prompt_injection(draft_text):
+        return {
+            "contract_type_guess": "拒絕審查",
+            "summary": "🚨 系統偵測到合約內容包含惡意指令（Prompt Injection），為保護系統與營業機密安全，已強制終止審查程序。",
+            "used_templates": [],
+            "major_issues": [],
+            "general_issues": [],
+            "missing_clauses": [],
+            "score": 0
+        }
+
     all_major = []
     all_general = []
+    found_topics_by_llm = set() 
 
     for idx, article in enumerate(articles, start=1):
         article_key = article_to_key(article, idx)
         candidate_chunks = search_template_chunks_for_article(article, selected_templates, n_results=10)
         article_result = llm_review_single_article(article, article_key, candidate_chunks)
 
-        all_major.extend(article_result.get("major_issues", []))
-        all_general.extend(article_result.get("general_issues", []))
+        majors = article_result.get("major_issues", [])
+        generals = article_result.get("general_issues", [])
+        
+        all_major.extend(majors)
+        all_general.extend(generals)
+        
+        for issue in majors + generals:
+            topic = issue.get("issue_topic")
+            if topic:
+                found_topics_by_llm.add(normalize_topic_name(topic))
 
-    missing_topics = infer_missing_topics_from_templates(selected_templates, articles, draft_text)
+    missing_topics = infer_missing_topics_from_templates(selected_templates, articles, found_topics_by_llm)
     missing_clauses = []
     
     for topic in missing_topics:
@@ -368,7 +410,6 @@ def normalize_review_json(raw: Dict[str, Any], used_templates: List[Dict[str, An
         article = article_map.get(article_key, {"content": ""})
         draft_text = normalize_text(article.get("content", "") or "")
 
-        # 直接取用 LLM 擷取的精華原文字句
         extracted_snippet = str(item.get("template_snippet", "詳見模板內容")).strip()
 
         issue = {
@@ -408,7 +449,7 @@ def normalize_review_json(raw: Dict[str, Any], used_templates: List[Dict[str, An
         seen = set()
         out = []
         for it in items:
-            key = (it.get("article_key", ""), it.get("issue_topic", ""), it.get("source", ""))
+            key = (it.get("article_key", ""), it.get("issue_topic", ""))
             if key not in seen:
                 seen.add(key)
                 out.append(it)
@@ -430,6 +471,22 @@ def normalize_review_json(raw: Dict[str, Any], used_templates: List[Dict[str, An
                 "core_topics": t.get("core_topics", []),
             })
 
+    current_score = 100
+    for issue in major_issues + general_issues:
+        risk_level = str(issue.get("risk", "")).lower()
+        if risk_level == "critical":
+            current_score -= 20
+        elif risk_level == "high":
+            current_score -= 10
+        elif risk_level == "medium":
+            current_score -= 5
+        else:
+            current_score -= 2
+            
+    missing_count = len(raw.get("missing_clauses", []))
+    current_score -= (missing_count * 3)
+    final_score = max(0, current_score)
+
     normalized = {
         "contract_type_guess": raw.get("contract_type_guess", "未判定"),
         "summary": "系統已根據動態檢索出的模板條文完成草稿審查，並結合預設紅線整理出潛在風險。",
@@ -437,7 +494,7 @@ def normalize_review_json(raw: Dict[str, Any], used_templates: List[Dict[str, An
         "major_issues": major_issues,
         "general_issues": general_issues,
         "missing_clauses": raw.get("missing_clauses", []),
-        "score": 85 
+        "score": final_score 
     }
     
     return normalized
