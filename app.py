@@ -2,19 +2,20 @@ import streamlit as st
 import os
 import datetime
 import logging
+import time
 
-# 引入 Database 模組
+# 載入資料庫模組
 from database import (
     count_history_records, insert_history_records, get_all_templates, 
     template_collection, chunk_collection, delete_template_by_doc_id, get_template_by_selector
 )
 
-# 引入 Utils 模組
+# 載入工具模組
 from utils import (
     extract_text_from_pdf, extract_text_from_docx, parse_template_selector
 )
 
-# 引入 Services 模組
+# 載入服務模組
 from services import (
     search_relevant_templates, review_articles_individually, normalize_review_json,
     assess_price_risk, llm_parse_user_request, generate_contract_from_template,
@@ -23,7 +24,7 @@ from services import (
 from database import search_templates_sql
 
 # =========================
-# 🎨 UI 渲染輔助函式 (Helpers)
+# UI 渲染輔助函式 (Helpers)
 # =========================
 def risk_label(risk: str) -> str:
     r = (risk or "").lower()
@@ -117,7 +118,7 @@ def render_review_dashboard(data: dict):
             render_missing_block(item)
 
 # =========================
-# 🚀 主程式 UI 佈局與安全 CSS
+# 主程式 UI 佈局與自訂 CSS
 # =========================
 st.set_page_config(
     page_title="企業智能法務中樞 | Core",
@@ -126,7 +127,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 安全的 CSS 微調 (不破壞 Streamlit 原生結構)
 st.markdown("""
 <style>
     /* 強調數據字體 */
@@ -188,6 +188,9 @@ if page == "🤖 智能法務助理":
             "role": "assistant",
             "content": "您好！我是您的企業 AI 法務中樞。請上傳合約草稿後輸入 `/review`，系統將自動調用 RAG 向量資料庫進行精準的風險打擊。"
         }]
+    
+    if "last_request_time" not in st.session_state:
+        st.session_state.last_request_time = 0
 
     with st.sidebar:
         st.markdown("### 📄 快速審查通道")
@@ -212,6 +215,16 @@ if page == "🤖 智能法務助理":
         msg_text = user_msg.strip()
 
         if msg_text.startswith("/review"):
+            current_time = time.time()
+            if current_time - st.session_state.last_request_time < 30:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "⏳ 系統正在冷卻中。為確保運算資源穩定，請等待 30 秒後再提交新的審查請求。"
+                })
+                st.rerun()
+                
+            st.session_state.last_request_time = current_time
+
             draft_content = msg_text.replace("/review", "", 1).strip()
 
             if not draft_content and draft_file is not None:
@@ -330,7 +343,7 @@ elif page == "🗃️ 企業知識庫管理":
     docs = get_all_templates()
 
     # =========================
-    # 📊 知識庫儀表板與篩選器
+    # 知識庫儀表板與篩選器
     # =========================
     st.markdown("### 📊 知識庫資產總覽")
     
@@ -374,7 +387,7 @@ elif page == "🗃️ 企業知識庫管理":
         st.caption(f"顯示 {len(filtered_docs)} / {len(docs)} 筆結果")
 
         # =========================
-        # 📄 條列顯示過濾後的合約
+        # 條列顯示過濾後的合約
         # =========================
         for doc in filtered_docs:
             with st.expander(f"📄 {doc.get('file_name')} | 類型: {doc.get('contract_type', '其他')}"):
